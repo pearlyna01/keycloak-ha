@@ -1,0 +1,149 @@
+services:
+  setup: # runs once to create certificate for HTTPS connection
+    image: alpine/openssl
+    entrypoint: [""]
+    command: ["/bin/sh","/generate-certs.sh"]
+    volumes:
+      - ./certs:/certs
+      - ./certs/generate-certs.sh:/generate-certs.sh
+
+  db:
+    image: postgres:18.3
+    shm_size: 128mb
+    environment:
+      POSTGRES_PASSWORD: password
+      POSTGRES_USER: keycloak
+      POSTGRES_DB: keycloak-db
+    ports:
+      - 5432:5432
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d keycloak-db -U keycloak"] 
+      interval: 30s
+      timeout: 60s
+      retries: 5
+      start_period: 80s
+    volumes:
+      - postgres-data:/var/lib/postgresql
+
+  keycloak-1:
+    depends_on:
+      db:
+        condition: service_healthy
+      setup:
+        condition: service_completed_successfully
+    image: quay.io/keycloak/keycloak:26.5.6
+    command: ["start","--cache=ispn"]
+    environment:
+      # for database connection
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://db:5432/keycloak-db
+      KC_DB_USERNAME: keycloak
+      kC_DB_PASSWORD: password
+      # for keycloak server configuration
+      KC_HOSTNAME: localhost
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_PROXY_HEADERS: forwarded
+      # for HTTPS settings
+      KC_CACHE_EMBEDDED_MTLS_ENABLED: true # Set to false if HTTP is used
+      KC_HTTPS_CERTIFICATE_FILE: /opt/keycloak/conf/keycloak-1.pem
+      KC_HTTPS_CERTIFICATE_KEY_FILE: /opt/keycloak/conf/keycloak-1.key
+      KC_HTTP_ENABLED: false # Set to true if HTTP is used
+      # for service health check 
+      KC_HEALTH_ENABLED: true
+      KC_HTTP_MANAGEMENT_SCHEME: http
+
+      # Debug to see forward headers
+      # KC_LOG_LEVEL: io.quarkus.vertx.http.runtime.ForwardedParser:debug
+      # https://www.keycloak.org/server/logging
+    ports:
+      #- 8080:8080 # HTTP default port 
+      - 8443:8443  # HTTPS default port
+
+      # Ports for CACHE https://www.keycloak.org/server/caching
+      - 7800:7800
+      - 57800:57800
+    healthcheck:
+      # https://www.keycloak.org/observability/health
+      test: ["CMD-SHELL", "{ printf 'HEAD /health/ready HTTP/1.0\r\n\r\n' >&0; grep 'HTTP/1.0 200'; } 0<>/dev/tcp/localhost/9000"]
+      interval: 30s
+      timeout: 60s
+      retries: 5
+      start_period: 80s
+    volumes:
+      - ./certs/keycloak-1.pem:/opt/keycloak/conf/keycloak-1.pem:ro
+      - ./certs/keycloak-1.key:/opt/keycloak/conf/keycloak-1.key:ro
+
+  keycloak-2:
+    depends_on:
+      db:
+        condition: service_healthy
+      setup:
+        condition: service_completed_successfully
+      keycloak-1:
+        condition: service_healthy
+    image: quay.io/keycloak/keycloak:26.5.6
+    command: ["start","--cache=ispn"]
+    environment:
+      # for database connection
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://db:5432/keycloak-db
+      KC_DB_USERNAME: keycloak
+      kC_DB_PASSWORD: password
+      # for keycloak server configuration
+      KC_HOSTNAME: localhost
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_PROXY_HEADERS: forwarded
+      # for HTTPS settings
+      KC_CACHE_EMBEDDED_MTLS_ENABLED: true # Set to false if HTTP is used
+      KC_HTTPS_CERTIFICATE_FILE: /opt/keycloak/conf/keycloak-2.pem
+      KC_HTTPS_CERTIFICATE_KEY_FILE: /opt/keycloak/conf/keycloak-2.key
+      KC_HTTP_ENABLED: false # Set to true if HTTP is used
+      # for service health check 
+      KC_HEALTH_ENABLED: true
+      KC_HTTP_MANAGEMENT_SCHEME: http
+      
+      # Debug to see forward headers
+      # KC_LOG_LEVEL: io.quarkus.vertx.http.runtime.ForwardedParser:debug
+      # https://www.keycloak.org/server/logging
+
+      # Variables only for 2nd server
+      #KC_HTTP_PORT: 8081
+      KC_HTTPS_PORT: 8444
+      KC_CACHE_EMBEDDED_NETWORK_BIND_PORT: 7801
+    ports:
+      #- 8081:8081 <- This is the port http
+      - 8444:8444
+      # Ports for CACHE https://www.keycloak.org/server/caching
+      - 7801:7801
+      - 57801:57801
+    healthcheck:
+      # https://www.keycloak.org/observability/health
+      test: ["CMD-SHELL", "{ printf 'HEAD /health/ready HTTP/1.0\r\n\r\n' >&0; grep 'HTTP/1.0 200'; } 0<>/dev/tcp/localhost/9000"]
+      interval: 30s
+      timeout: 60s
+      retries: 5
+      start_period: 80s
+    volumes:
+      - ./certs/keycloak-2.pem:/opt/keycloak/conf/keycloak-2.pem:ro
+      - ./certs/keycloak-2.key:/opt/keycloak/conf/keycloak-2.key:ro
+
+  nginx:
+    depends_on:
+      keycloak-1:
+        condition: service_healthy
+      keycloak-2:
+        condition: service_healthy
+      setup:
+        condition: service_completed_successfully
+    image: nginx:1.29.7-alpine-slim
+    ports:
+      - 8000:8000
+    volumes:
+      - ./keycloak.conf:/etc/nginx/conf.d/keycloak.conf:ro
+      - ./certs/localhost.key:/etc/nginx/certs/localhost.key:ro
+      - ./certs/localhost.pem:/etc/nginx/certs/localhost.pem:ro
+    
+volumes:
+  postgres-data:
